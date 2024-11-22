@@ -19,6 +19,62 @@ from PyQt5.QtWidgets import QMessageBox
 from bernoulliGUI import Ui_MplMainWindow
 import serial
 
+from pylab import *
+ion() 
+close("all") 
+
+# etalonnage des capteurs 
+Q_meter = array([0.90, 3.38, 6.72, 10.7, 13.62, 15.80, 19.08, 22.26, 24.76]) 
+Q_num   = array([7.5, 106.3, 238.8, 397.6, 513.31, 601, 731, 858.6, 956.3 ]) 
+a_Q = 0.0251244
+b_Q = 0.7123277886
+# a fit says that Q_meter = Q_num*0.0251244 + 0.7123277886
+
+P_meter = array([2.5, 9.5, 16, 24.5]) 
+P_num   = array([4.8, 21.8, 40.0, 64.8 ]) 
+a_P = 0.3645315347606813
+b_P = 1.150139083111622
+
+
+# Let's scale the signal recieved from arduino and convert it to a pressure in mbar. 
+# 1/ Part 1 for low pressures < "40" for arduino and < 20mbar in reality. 
+Q = array([3.58, 6.48, 7.60, 8.72, 10.86,  14.5, 17.19, 18.70, 21.10, 24.64 ]) / 1000/60
+rho=1000; nu=1.0e-6; d=19e-3; L=980e-3; S=pi*d**2/4; 
+U = Q/S 
+Re = U*d/nu 
+ldth = 0.316*Re**(-1/4.)
+P_th = ldth*L/d*0.5*rho*U**2   /100 # /100 to make it mbar  
+P_num   = array([0.7, 1.95, 3.05, 4.15, 6.55,  12.95, 18.85, 21.95, 28.15, 37.95]) # discretized tension ! 
+coeffsP = polyfit(P_num, P_th, 5) 
+print(coeffsP)
+def convert_to_P_low(PP):
+    PP = array(PP)
+    P_test = 0*PP
+    for i in range(len(coeffsP)):
+        P_test = P_test + coeffsP[i]*PP**(len(coeffsP)-1-i)
+    return P_test # in mbar 
+#PP = linspace(0,40,1000)
+#figure() 
+#plot(P_num, P_th, 'o') 
+#plot(PP, convert_to_P(PP), 'r') 
+#sys.exit() 
+# 2/ Part 2 is for pressures higher than 20 mbar or arduino=40 
+P_meter = array([132, 190, 230, 300, 340]) # in mbar  
+P_num   = array([368, 525, 645, 845, 945]) 
+a_P_highP = 0.356521 
+b_P_highP = 1.0992
+def convert_to_P_high(PP):
+    return a_P_highP * array(PP) + b_P_highP  
+# Pack these 2 functions into a single one for simple use 
+def convert_to_P(PP):
+    PP = array(PP) 
+    for i,Ploc in enumerate(PP):
+        if Ploc < 50:
+            PP[i] = convert_to_P_low(Ploc)
+        elif Ploc >=50 and Ploc<1023:
+            PP[i] = convert_to_P_high(Ploc)
+    return PP
+
 
 try:
     _fromUtf8 = QtCore.QString.fromUtf8
@@ -47,44 +103,94 @@ class DesignerMainWindow(QtGui.QMainWindow, Ui_MplMainWindow):
     self.mpl.canvas.ax2.set_xlabel('Time (s)')
     self.mpl.canvas.ax2.set_title( 'Pressure difference (mbar)' ) 
     self.hQ, = self.mpl.canvas.ax1.plot( self.tQ, self.Q, '-b')  
+    self.hQav, = self.mpl.canvas.ax1.plot( self.tQ, self.Q, '-r')  
     self.hP, = self.mpl.canvas.ax2.plot( self.tP, self.P, '-g')  
-    self.textQ = self.mpl.canvas.ax1.text(0.1, 0.9, f'Flow rate: {self.Qavg} L/min', transform=self.mpl.canvas.ax1.transAxes)
-    self.textP = self.mpl.canvas.ax2.text(0.1, 0.9, f'Pressure: {self.Pavg} mbar', transform=self.mpl.canvas.ax2.transAxes)
+    self.hPav, = self.mpl.canvas.ax2.plot( self.tP, self.P, '-r')  
 
     # Set up the serial connection (adjust 'COM3' to your port and baudrate if necessary)
-    self.ser = serial.Serial('ttyUSB0', 9600)  # Replace 'COM3' with the correct port for your Arduino
-    while True:
-        try:
-            # Read the serial data as a string
-            line = self.ser.readline().decode('utf-8').strip()
-            
-            # Parse the data based on known format
-            if line.startswith('Flow'):
-                flow_value = int(line.split()[1])  # Extract the flow rate value
-                self.Q.append(flow_value)               # Add to flow data array
-                self.tQ.append(time.time() - self.tinit) # Add to time array 
-                
-            elif line.startswith('Pressure'):
-                pressure_value = int(line.split()[1])  # Extract the pressure value
-                self.P.append(pressure_value)   # Add to pressure data array
-                self.tP.append(time.time() - self.tinit) # Add to time array 
-                
-        except Exception as e:
-            print(f"Error reading serial data: {e}")
+    self.ser = serial.Serial('/dev/ttyUSB0', 9600)  # Replace 'COM3' with the correct port for your Arduino
 
-        # Update plots 
-        self.hQ.set_data( self.tQ, self.Q )
-        self.hP.set_data( self.tP, self.P )
-        self.ax1.relim() 
-        self.ax2.relim() 
-        self.mpl.canvas.draw()
-        sleep(0.01)
+  def run(self):
+      while True:
+          try:
+              # Read the serial data as a string
+              line = self.ser.readline().decode('utf-8').strip()
+              
+              # Parse the data based on known format
+              if line.startswith('Flow'):
+                  flow_value = int(line.split()[1])  # Extract the flow rate value
+                  self.Q.append(flow_value)               # Add to flow data array
+                  self.tQ.append(time.time() - self.tinit) # Add to time array 
+                  
+              elif line.startswith('Pressure'):
+                  pressure_value = int(line.split()[1])  # Extract the pressure value
+                  self.P.append(pressure_value)   # Add to pressure data array
+                  self.tP.append(time.time() - self.tinit) # Add to time array 
+                  
+          except Exception as e:
+              print(f"Error reading serial data: {e}")
 
-        # Perform average calculation
-        if self.tQ[-1] - self.tQ[0]> self.tavg:
-            self.Qavg = mean( self.Q[self.tQ>self.tQ[-1]-self.tavg] ) 
-        if self.tP[-1] - self.tP[0]> self.tavg:
-            self.Pavg = mean( self.P[self.tP>self.tP[-1]-self.tavg] ) 
+
+          
+          # Perform average calculation
+
+          if len(self.tQ) > 0:
+              # go for numpy 
+              tQ = array(self.tQ) 
+              Q = array(self.Q)*a_Q + b_Q 
+
+
+              # Calculate running average value 
+              if self.tQ[-1] - self.tQ[0]> self.tavg:
+                  self.Qavg = mean( Q[tQ>self.tQ[-1]-self.tavg])  
+                  self.mpl.canvas.ax1.set_title( f'Flow rate: {self.Qavg:4.1f} (L/min)' )
+              # Trim data when larger than necessary for plotting 
+              if self.tQ[-1] - self.tQ[0]> self.tacq:
+                  # find index such that it's equal 
+                  imin = argmin( abs(tQ[-1] - tQ - self.tacq) )
+                  self.tQ = self.tQ[imin:]
+                  self.Q  = self.Q [imin:]
+              # Update plots 
+              self.hQ.set_data( tQ, Q )
+              self.hQav.set_data( [tQ[-1]-self.tavg, tQ[-1]], [self.Qavg, self.Qavg] )
+              self.mpl.canvas.ax1.set_xlim( tQ.min() , tQ.max() ) 
+              self.mpl.canvas.ax1.set_ylim( Q.min()*0.9 , Q.max()*1.1 )  
+
+          if len(self.tP) > 0:
+              # go for numpy 
+              tP = array(self.tP) 
+              P = convert_to_P(self.P) 
+
+
+              # Calculate running average value 
+              if self.tP[-1] - self.tP[0]> self.tavg:
+                  self.Pavg = mean( P[tP>self.tP[-1]-self.tavg])  
+                  self.mpl.canvas.ax2.set_title( f'Pressure difference: {self.Pavg:4.1f} (mbar)' )
+              # Trim data when larger than necessary for plotting 
+              if self.tP[-1] - self.tP[0]> self.tacq:
+                  # find index such that it's equal 
+                  imin = argmin( abs(tP[-1] - tP - self.tacq) )
+                  self.tP = self.tP[imin:]
+                  self.P  = self.P [imin:]
+              # Update plots 
+              self.hP.set_data( tP, P )
+              self.hPav.set_data( [tP[-1]-self.tavg, tP[-1]], [self.Pavg, self.Pavg] )
+              self.mpl.canvas.ax2.set_xlim( tP.min() , tP.max() ) 
+              self.mpl.canvas.ax2.set_ylim( P.min()*0.9 , P.max()*1.1 )  
+
+              self.mpl.canvas.draw()
+              time.sleep(0.01)
+               
+
+          # Read the parameters again 
+          try:
+            self.tacq = float( self.lineEdit_displayTime.text()   ) 
+            self.tavg = float( self.lineEdit_AveragingTime.text() )
+          except:
+              pass
+
+
+          QtCore.QCoreApplication.processEvents()
 
 
 # create the GUI application
